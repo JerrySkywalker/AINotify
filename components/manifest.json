@@ -4,16 +4,19 @@
   "components": [
     {
       "repository": "ai-notify-agent",
+      "url": "https://github.com/JerrySkywalker/ai-notify-agent",
       "checkout": "../ai-notify-agent",
       "role": "collector and Windows desktop"
     },
     {
       "repository": "ai-notify-relay",
+      "url": "https://github.com/JerrySkywalker/ai-notify-relay",
       "checkout": "../ai-notify-relay",
       "role": "relay and API contract"
     },
     {
       "repository": "ai-notify-android",
+      "url": "https://github.com/JerrySkywalker/ai-notify-android",
       "checkout": "../ai-notify-android",
       "role": "Android and Wear OS apps"
     }
