@@ -39,3 +39,5 @@ Use PowerShell 7.4+, Rust, JDK 17, Android SDK Platform 36 and Build Tools 36.0.
 Use `-WearMode paired` after pairing the AVDs in Android Studio. Use `-Linux` to build and test both Rust components in a local Linux container. `-Offline` uses the Gradle dependency cache. Reports and screenshots go to `build/ci/`. The desktop check runs in the interactive Windows session.
 
 The Android prototype uses an explicitly enabled foreground receiver. See the [roadmap](docs/ROADMAP.md) for background push and device testing.
+
+[Android inbox v3](docs/phone-inbox.md) covers the latest phone interface and relay opt-in.

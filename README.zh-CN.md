@@ -18,3 +18,5 @@
 原型包包含 Windows 托盘程序、Windows 和 Linux 采集端与 relay、Android 和 Wear OS 调试 APK，以及 SHA-256 校验值。手机和手表均用 API 35 模拟器验收，手表走 relay 直连。模拟器使用前台服务收取事件。
 
 把四个仓库检出为同级目录。项目清单见 [components/manifest.json](components/manifest.json)。安装步骤、双模拟器参数和本地 CI 命令见 [英文 README](README.md)。四个仓库均禁用 GitHub Actions，CI 继续在本机运行。后续计划见 [路线图](docs/ROADMAP.md)。
+
+[Android 收件箱 v3](docs/phone-inbox.md) 介绍新界面、操作同步和本地验收。

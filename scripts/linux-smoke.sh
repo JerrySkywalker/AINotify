@@ -21,7 +21,7 @@ agent=/output/ai-notify-agent
 
 printf '%s' local-ci-linux-writer-fixture-only-77 |
     "$agent" --home "$state" configure --name 'Linux CI' --relay "$url" --include-message
-"$agent" --home "$state" hooks install claude-code --tool-home "$hooks"
+"$agent" --home "$state" hooks install claude-code --tool-home "$hooks" --frontend-id claude-code-cli --frontend-label "Claude Code CLI"
 command=$(sed -nE 's/^[[:space:]]*"command": "(.*)",?$/\1/p' "$hooks/settings.json")
 test -n "$command"
 printf '%s' '{"hook_event_name":"Stop","cwd":"/work/ci","session_id":"linux-session","last_assistant_message":"Linux 本轮完成"}' |
@@ -41,4 +41,5 @@ done
 feed=$(curl -fSs --noproxy '*' -H "Authorization: Bearer $AINOTIFY_READER_TOKEN" "$url/v1/events")
 printf '%s' "$feed" | grep -F 'Linux 本轮完成' >/dev/null
 printf '%s' "$feed" | grep -F '"device_id":"linux-ci"' >/dev/null
+printf '%s' "$feed" | grep -F '"frontend":{"id":"claude-code-cli","label":"Claude Code CLI"}' >/dev/null
 printf '%s\n' 'PASS: Native Linux build, installed shell Hook, offline recovery and UTF-8 event' | tee /output/receipt.txt

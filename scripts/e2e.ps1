@@ -16,6 +16,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $package = 'io.github.jerryskywalker.ainotify.dev'
 $namespace = 'io.github.jerryskywalker.ainotify'
+. (Join-Path $PSScriptRoot 'phone-inbox-ci.ps1')
 $adb = Join-Path $SdkRoot 'platform-tools/adb.exe'
 $profile = if ($DebugRust) { 'debug' } else { 'release' }
 $agentExe = Join-Path $AgentRoot "target/$profile/ai-notify-agent.exe"
@@ -105,8 +106,12 @@ function Prepare-Avd([string]$Serial, [string]$Apk, [string]$Flavor, [bool]$Dire
     # CI owns the .dev application data on explicitly selected emulators.
     $null = Invoke-CheckedAdb $Serial @('shell','pm','clear',$package)
     $null = Invoke-CheckedAdb $Serial @('shell','pm','grant',$package,'android.permission.POST_NOTIFICATIONS')
+    if ($Flavor -eq 'mobile') {
+        $null = Invoke-CheckedAdb $Serial @('shell','cmd','locale','set-app-locales',$package,'--locales','en')
+    }
     if ($Direct) {
-        $settings = @{relay="http://10.0.2.2:$port";token=$reader} | ConvertTo-Json -Compress
+        $credential = if ($Flavor -eq 'mobile') { $inboxToken } else { $reader }
+        $settings = @{relay="http://10.0.2.2:$port";token=$credential} | ConvertTo-Json -Compress
         $settingsName = if ($Flavor -eq 'mobile') { 'phone' } else { 'wear' }
         $null = Invoke-ProcessInput $adb @('-s',$Serial,'shell','-T',"run-as $package sh -c 'mkdir -p files && cat > files/$settingsName-settings.json'") $settings
     }
@@ -171,6 +176,7 @@ $port = $listener.LocalEndpoint.Port
 $listener.Stop()
 $url = "http://127.0.0.1:$port"
 $reader = [Guid]::NewGuid().ToString('N')
+$inboxToken = [Guid]::NewGuid().ToString('N')
 $writers = @{
     win = [Guid]::NewGuid().ToString('N')
     linux = [Guid]::NewGuid().ToString('N')
@@ -181,6 +187,7 @@ $childEnvironment = @{
     AINOTIFY_LISTEN = "127.0.0.1:$port"
     AINOTIFY_DB = (Join-Path $scratch 'test.sqlite3')
     AINOTIFY_READER_TOKEN = $reader
+    AINOTIFY_INBOX_TOKEN = $inboxToken
     AINOTIFY_WRITERS = ($writers | ConvertTo-Json -Compress)
 }
 $relayProcess = $null
@@ -213,8 +220,8 @@ try {
 
     $body = "原型验收：最后一条回复。" + (("启动测试并保留末尾标记。") * 60) + ' END-AINOTIFY-WINDOWS'
     $cases = @(
-        @{id='win';tool='codex';name='CI-Windows';project='demo-win';body=$body},
-        @{id='linux';tool='claude-code';name='CI-Linux';project='demo-linux';body='Claude Code 本轮完成。 END-AINOTIFY-LINUX'}
+        @{id='win';tool='codex';frontend='codex-desktop';frontendLabel='Codex Desktop';name='CI-Windows';project='demo-win';body=$body},
+        @{id='linux';tool='claude-code';frontend='claude-code-cli';frontendLabel='Claude Code CLI';name='CI-Linux';project='demo-linux';body='Claude Code 本轮完成。 END-AINOTIFY-LINUX'}
     )
 
     Stop-TestRelay $relayProcess
@@ -224,7 +231,7 @@ try {
         $toolHome = Join-Path $scratch ("tool-" + $case.id)
         $case.state = $state
         $null = Invoke-ProcessInput $agentExe @('--home',$state,'configure','--name',$case.name,'--relay',$url,'--include-message') $writers[$case.id]
-        $null = Invoke-ProcessInput $agentExe @('--home',$state,'hooks','install',$case.tool,'--tool-home',$toolHome) ''
+        $null = Invoke-ProcessInput $agentExe @('--home',$state,'hooks','install',$case.tool,'--tool-home',$toolHome,'--frontend-id',$case.frontend,'--frontend-label',$case.frontendLabel) ''
         $file = if ($case.tool -eq 'codex') { 'hooks.json' } else { 'settings.json' }
         $toolSettings = Get-Content -Raw -LiteralPath (Join-Path $toolHome $file) | ConvertFrom-Json
         $parts = $toolSettings.hooks.Stop[0].hooks[0].command.Split(' ')
@@ -255,7 +262,7 @@ try {
         [IO.File]::WriteAllText($case.queueFile,$case.raw)
         $null = Invoke-ProcessInput $agentExe @('--home',$case.state,'run','--once') ''
         $entry = Invoke-RestMethod -NoProxy "$url/v1/events/$($case.eventId)" -Headers $readHeaders
-        if ($entry.message -cne $case.body -or $entry.device_id -ne $case.id -or $entry.project -ne $case.project) {
+        if ($entry.message -cne $case.body -or $entry.device_id -ne $case.id -or $entry.project -ne $case.project -or $entry.frontend.id -ne $case.frontend -or $entry.frontend.label -ne $case.frontendLabel) {
             throw 'Persisted reply or source differs from the captured event'
         }
     }
@@ -296,6 +303,19 @@ try {
     Save-Screenshot $WearSerial 'wear-preview.png'
     "PASS: Android notification tap and full reply; Wear OS notification and preview ($WearMode mode)"
 
+    try {
+        Run-PhoneInboxChecks
+    } catch {
+        $failure = $_
+        try {
+            (Get-Ui $PhoneSerial).OuterXml | Set-Content -LiteralPath (Join-Path $OutputDir 'phone-inbox-failure.xml') -Encoding utf8NoBOM
+            Save-Screenshot $PhoneSerial 'phone-inbox-failure.png'
+        } catch {
+            Write-Warning 'Could not capture the phone UI after failure.'
+        }
+        throw $failure
+    }
+
     if (-not $SkipDesktop) {
         $smoke = @{
             DesktopExe = $desktopExe
@@ -317,7 +337,7 @@ try {
         phone = $PhoneSerial
         wear = $WearSerial
         wear_mode = $WearMode
-        passed = @('hook-stdin','offline-retry','auth','sqlite-restart','dedup','cursor','phone-notification','phone-detail','wear-notification','wear-preview')
+        passed = @('hook-stdin','offline-retry','auth','sqlite-restart','dedup','cursor','phone-notification','phone-detail','wear-notification','wear-preview','frontend-identity','device-group-filters','phone-swipes','phone-undo','relay-inbox-auth','relay-inbox-idempotency','phone-offline-recovery','phone-trash-restore','phone-language-theme-accent')
         desktop = if ($SkipDesktop) { 'skipped' } else { 'passed' }
         real_ai_sessions = 'not run by this offline integration check'
         revisions = $revisions
