@@ -1,0 +1,10 @@
+emulator-5562 AINotify_Phone_Debug_API_35
+emulator-5558 AINotify_Wear_API_35
+PASS: Installed native Stop commands accept UTF-8 stdin and preserve offline events
+PASS: Writer/reader roles, restart recovery, stable event IDs, cursor and complete body
+PASS: Android notification tap and full reply; Wear OS notification and preview (paired mode)
+PASS: Device groups, selections and independent frontend facets in the phone UI
+PASS: Native right and left swipes, undo, relay patching, offline restart and trash restore
+PASS: App language, theme, accent, palette pixels and system appearance
+PASS: Phone received replacement relay sequence 1 (previous watch cursor: 5)
+Timed out: replacement relay first event on paired watch

@@ -1,4 +1,4 @@
-#requires -Version 7.4
+﻿#requires -Version 7.4
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$AgentRoot,
@@ -10,7 +10,8 @@ param(
     [ValidateSet('direct','paired')][string]$WearMode = 'direct',
     [Parameter(Mandatory)][string]$OutputDir,
     [switch]$DebugRust,
-    [switch]$SkipDesktop
+    [switch]$SkipDesktop,
+    [string]$RelayExe
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,7 +22,7 @@ $adb = Join-Path $SdkRoot 'platform-tools/adb.exe'
 $profile = if ($DebugRust) { 'debug' } else { 'release' }
 $agentExe = Join-Path $AgentRoot "target/$profile/ai-notify-agent.exe"
 $desktopExe = Join-Path $AgentRoot "target/$profile/ai-notify-desktop.exe"
-$relayExe = Join-Path $RelayRoot "target/$profile/ai-notify-relay.exe"
+if (-not $RelayExe) { $RelayExe = Join-Path $RelayRoot "target/$profile/ai-notify-relay.exe" }
 $phoneApk = Join-Path $AndroidRoot 'mobile/build/outputs/apk/debug/mobile-debug.apk'
 $wearApk = Join-Path $AndroidRoot 'wear/build/outputs/apk/debug/wear-debug.apk'
 foreach ($file in @($adb,$agentExe,$relayExe,$phoneApk,$wearApk)) {
@@ -72,20 +73,30 @@ function Wait-For([scriptblock]$Check, [string]$Label, [int]$Seconds = 30) {
     throw "Timed out: $Label"
 }
 
-function Start-TestRelay {
+function Get-TestRelayPort {
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    try { $listener.LocalEndpoint.Port } finally { $listener.Stop() }
+}
+
+function Start-TestRelay(
+    [string]$RelayUrl = $url,
+    [hashtable]$RelayEnvironment = $childEnvironment,
+    [string]$LogPrefix = 'relay'
+) {
     $arguments = @{
         FilePath = $relayExe
-        Environment = $childEnvironment
+        Environment = $RelayEnvironment
         PassThru = $true
         WindowStyle = 'Hidden'
-        RedirectStandardOutput = (Join-Path $OutputDir 'relay.stdout.log')
-        RedirectStandardError = (Join-Path $OutputDir 'relay.stderr.log')
+        RedirectStandardOutput = (Join-Path $OutputDir "$LogPrefix.stdout.log")
+        RedirectStandardError = (Join-Path $OutputDir "$LogPrefix.stderr.log")
     }
     $process = Start-Process @arguments
     try {
         $null = Wait-For {
             if ($process.HasExited) { throw 'Relay exited during startup.' }
-            try { (Invoke-RestMethod -NoProxy "$url/healthz" -TimeoutSec 2).ok } catch { }
+            try { (Invoke-RestMethod -NoProxy "$RelayUrl/healthz" -TimeoutSec 2).ok } catch { }
         } 'relay health'
         $process
     } catch {
@@ -101,21 +112,35 @@ function Stop-TestRelay($Process) {
     }
 }
 
+function Set-AvdRelay([string]$Serial, [string]$Profile, [int]$RelayPort, [string]$Credential) {
+    $settings = @{relay="http://10.0.2.2:$RelayPort";token=$Credential} | ConvertTo-Json -Compress
+    $null = Invoke-ProcessInput $adb @('-s',$Serial,'shell','-T',"run-as $package sh -c 'mkdir -p files && cat > files/$Profile-settings.json'") $settings
+}
+
 function Prepare-Avd([string]$Serial, [string]$Apk, [string]$Flavor, [bool]$Direct) {
+    $null = Invoke-CheckedAdb $Serial @('shell','svc','power','stayon','true')
+    $null = Invoke-CheckedAdb $Serial @('shell','input','keyevent','KEYCODE_WAKEUP')
+    $null = Invoke-CheckedAdb $Serial @('shell','wm','dismiss-keyguard')
+    $null = Invoke-CheckedAdb $Serial @('shell','locksettings','set-disabled','true')
+    $null = Invoke-CheckedAdb $Serial @('shell','settings','put','global','cached_apps_freezer','disabled')
+    $null = Invoke-CheckedAdb $Serial @('shell','settings','put','secure','spell_checker_enabled','0')
     $null = Invoke-CheckedAdb $Serial @('install','-r',$Apk)
     # CI owns the .dev application data on explicitly selected emulators.
     $null = Invoke-CheckedAdb $Serial @('shell','pm','clear',$package)
+    $null = Invoke-CheckedAdb $Serial @('shell','cmd','package','compile','-m','speed',$package)
     $null = Invoke-CheckedAdb $Serial @('shell','pm','grant',$package,'android.permission.POST_NOTIFICATIONS')
+    $null = Invoke-CheckedAdb $Serial @('shell','cmd','deviceidle','whitelist',"+$package")
     if ($Flavor -eq 'mobile') {
         $null = Invoke-CheckedAdb $Serial @('shell','cmd','locale','set-app-locales',$package,'--locales','en')
     }
     if ($Direct) {
         $credential = if ($Flavor -eq 'mobile') { $inboxToken } else { $reader }
-        $settings = @{relay="http://10.0.2.2:$port";token=$credential} | ConvertTo-Json -Compress
         $settingsName = if ($Flavor -eq 'mobile') { 'phone' } else { 'wear' }
-        $null = Invoke-ProcessInput $adb @('-s',$Serial,'shell','-T',"run-as $package sh -c 'mkdir -p files && cat > files/$settingsName-settings.json'") $settings
+        Set-AvdRelay $Serial $settingsName $port $credential
     }
-    $null = Invoke-CheckedAdb $Serial @('shell','am','start','-W','-n',"$package/$namespace.$Flavor.MainActivity",'--ez','ainotify_start','true')
+    if ($Direct -or $Flavor -eq 'mobile') {
+        $null = Invoke-CheckedAdb $Serial @('shell','am','start','-W','-n',"$package/$namespace.$Flavor.MainActivity",'--ez','ainotify_start','true')
+    }
 }
 
 function Test-Notification([string]$Serial, [string]$Id) {
@@ -124,15 +149,153 @@ function Test-Notification([string]$Serial, [string]$Id) {
 }
 
 function Get-Ui([string]$Serial) {
-    $null = Invoke-CheckedAdb $Serial @('shell','uiautomator','dump','/sdcard/ainotify-ci.xml')
-    $raw = Invoke-CheckedAdb $Serial @('exec-out','cat','/sdcard/ainotify-ci.xml')
-    [xml]($raw -join [Environment]::NewLine)
+    for ($i = 0; $i -lt 5; $i++) {
+        $dump = & $adb -s $Serial shell uiautomator dump /sdcard/ainotify-ci.xml 2>&1
+        $raw = & $adb -s $Serial exec-out cat /sdcard/ainotify-ci.xml 2>$null
+        $text = ($raw -join [Environment]::NewLine).Trim()
+        if ($text -and $text -match '^<\?xml.*</hierarchy>$') {
+            try { return [xml]$text } catch { }
+        }
+        & $adb -s $Serial shell input keyevent KEYCODE_WAKEUP 2>$null | Out-Null
+        Start-Sleep -Milliseconds 400
+    }
+    throw "Failed to dump UI on $Serial ($dump)"
 }
 
 function Save-Screenshot([string]$Serial, [string]$Name) {
     $file = Join-Path $OutputDir $Name
     & $adb -s $Serial exec-out screencap -p > $file
     if ($LASTEXITCODE -or (Get-Item -LiteralPath $file).Length -lt 128) { throw "Screenshot failed on $Serial" }
+}
+
+function Test-PairedRelaySwitch {
+    $saved = Invoke-CheckedAdb $WearSerial @('shell','run-as',$package,'cat','files/wear-inbox.json')
+    $oldCursor = ($saved -join '' | ConvertFrom-Json).cursor
+    if ($oldCursor -le 1) { throw 'The paired watch needs a cursor above the new relay first sequence.' }
+
+    $newPort = Get-TestRelayPort
+    $newUrl = "http://127.0.0.1:$newPort"
+    $newEnvironment = $childEnvironment.Clone()
+    $newEnvironment.AINOTIFY_LISTEN = "127.0.0.1:$newPort"
+    $newEnvironment.AINOTIFY_DB = Join-Path $scratch 'paired-switch.sqlite3'
+    $newRelay = Start-TestRelay $newUrl $newEnvironment 'paired-switch-relay'
+    try {
+        $empty = Invoke-RestMethod -NoProxy "$newUrl/v1/events" -Headers $readHeaders
+        if ($empty.events.Count -ne 0 -or $empty.next_cursor -ne 0) { throw 'Replacement relay must start empty.' }
+
+        $null = Invoke-CheckedAdb $PhoneSerial @('shell','am','force-stop',$package)
+        Set-AvdRelay $PhoneSerial 'phone' $newPort $inboxToken
+        $null = Invoke-CheckedAdb $PhoneSerial @('shell','am','start','-W','-n',"$package/$namespace.mobile.MainActivity",'--ez','ainotify_start','true')
+        Start-Sleep -Seconds 4
+        $null = Invoke-CheckedAdb $PhoneSerial @('shell','input','keyevent','KEYCODE_HOME')
+        $null = Invoke-CheckedAdb $WearSerial @('shell','input','keyevent','KEYCODE_WAKEUP')
+
+        $id = [Guid]::NewGuid().ToString()
+        $preview = 'First reply from the replacement relay'
+        $event = @{
+            schema_version = 1; id = $id; tool = 'manual'; kind = 'test'; device_name = 'CI-Relay-Switch'
+            occurred_at_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); message = $preview
+        } | ConvertTo-Json -Compress
+        $created = Invoke-RestMethod -NoProxy "$newUrl/v1/events" -Method Post `
+            -Headers @{Authorization="Bearer $($writers.win)"} -ContentType 'application/json' -Body $event
+        if ($created.seq -ne 1) { throw 'Expected the first replacement relay event at sequence 1.' }
+        $null = Wait-For { Test-Notification $PhoneSerial $id } 'replacement relay first event on phone'
+        "PASS: Phone received replacement relay sequence 1 (previous watch cursor: $oldCursor)"
+        $null = Wait-For { & $adb -s $WearSerial shell input keyevent KEYCODE_WAKEUP 2>$null | Out-Null; Test-Notification $WearSerial $id } 'replacement relay first event on paired watch' 90
+        $null = Invoke-CheckedAdb $WearSerial @('shell','am','start','-W','-n',"$package/$namespace.wear.MainActivity",'--es','ainotify_event',$id)
+        $null = Wait-For { (Get-Ui $WearSerial).OuterXml.Contains($preview) } 'replacement relay watch preview'
+        Save-Screenshot $WearSerial 'wear-replacement-relay.png'
+        'PASS: First event from an empty replacement relay notified both phone and paired watch'
+    } finally {
+        Stop-TestRelay $newRelay
+        Set-AvdRelay $PhoneSerial 'phone' $port $inboxToken
+        $null = Invoke-CheckedAdb $PhoneSerial @('shell','am','force-stop',$package)
+        $null = Invoke-CheckedAdb $PhoneSerial @('shell','am','start','-W','-n',"$package/$namespace.mobile.MainActivity",'--ez','ainotify_start','true')
+        Start-Sleep -Seconds 4
+        $null = Invoke-CheckedAdb $PhoneSerial @('shell','input','keyevent','KEYCODE_HOME')
+    }
+}
+
+function Test-PushWakeupAndBackgroundSync {
+    "Testing push registration, screen-off wakeup, deduplication and background sync..."
+    $pushToken = "ci-device-token-" + [Guid]::NewGuid().ToString('N')
+    $script:lastPushToken = $pushToken
+    $regBody = @{
+        token = $pushToken
+        device_type = 'android'
+        app_id = 'io.github.jerryskywalker.ainotify'
+    } | ConvertTo-Json
+    $null = Invoke-RestMethod -NoProxy "$url/v1/devices/register" -Method Post -Headers @{Authorization="Bearer $inboxToken"} -ContentType 'application/json' -Body $regBody
+
+    $devs = Invoke-RestMethod -NoProxy "$url/v1/devices" -Headers @{Authorization="Bearer $inboxToken"}
+    $expectedMask = "***" + $pushToken.Substring($pushToken.Length - 4)
+    $match = $devs.devices | Where-Object { $_.token_mask -eq $expectedMask }
+    if (-not $match) { throw "Push device registration did not appear in /v1/devices" }
+    if ($match.PSObject.Properties['token'] -and $match.token) { throw "Raw push token exposed in /v1/devices response!" }
+
+    # Stop foreground ReceiveService to verify push wakeup works independently
+    $null = & $adb -s $PhoneSerial shell am stopservice "$package/$namespace.mobile.ReceiveService" 2>&1
+    Start-Sleep -Seconds 1
+    $null = Invoke-CheckedAdb $PhoneSerial @('shell','input','keyevent','KEYCODE_SLEEP')
+
+    $pushId = [Guid]::NewGuid().ToString()
+    $pushEvent = @{
+        schema_version = 1
+        id = $pushId
+        tool = 'manual'
+        frontend = @{ id = 'push-ci'; label = 'Push CI' }
+        kind = 'test'
+        device_name = 'Push Trigger'
+        occurred_at_ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        message = 'Push Wakeup Delivered Successfully'
+        message_truncated = $false
+    } | ConvertTo-Json -Depth 4
+    $posted = Invoke-RestMethod -NoProxy "$url/v1/events" -Method Post -Headers @{Authorization="Bearer $($writers.win)"} -ContentType 'application/json' -Body $pushEvent
+
+    $deliveries = Invoke-RestMethod -NoProxy "$url/v1/push/deliveries" -Headers @{Authorization="Bearer $inboxToken"}
+    $del = $deliveries.deliveries | Where-Object { $_.event_id -eq $pushId }
+    if (-not $del) { throw "Relay did not record push delivery for $pushId" }
+    if ($del.PSObject.Properties['token'] -and $del.token) { throw "Raw push token exposed in /v1/push/deliveries response!" }
+    if ($del.channel -ne 'local_simulation') { throw "Expected channel 'local_simulation' for simulated push delivery" }
+
+    # Leave the event in SQLite and make the first scheduled pull fail with the receiver off.
+    Stop-TestRelay $script:relayProcess
+    $null = Invoke-CheckedAdb $PhoneSerial @('shell','am','broadcast','-p',$package,'-a','io.github.jerryskywalker.ainotify.PUSH_WAKEUP','--es','event_id',$pushId,'--el','seq',"$($posted.seq)")
+    try {
+        $null = Wait-For {
+            $workerLog = Invoke-CheckedAdb $PhoneSerial @('logcat','-d','-s','AINotifyWork:I')
+            ($workerLog -join "`n").Contains("SyncWorker eventId=$pushId result=Retry")
+        } 'push worker schedules retry while Relay is down' 45
+        if (Test-Notification $PhoneSerial $pushId) { throw 'Phone notified before the Relay recovered.' }
+    } finally {
+        $script:relayProcess = Start-TestRelay $url $childEnvironment 'relay-after-push-outage'
+    }
+    $null = Wait-For { Test-Notification $PhoneSerial $pushId } 'push notification after Relay recovers without a second broadcast' 105
+
+    $null = Invoke-CheckedAdb $PhoneSerial @('shell','am','broadcast','-p',$package,'-a','io.github.jerryskywalker.ainotify.PUSH_WAKEUP','--es','event_id',$pushId,'--el','seq',"$($posted.seq)")
+    $null = Wait-For {
+        $workerLog = Invoke-CheckedAdb $PhoneSerial @('logcat','-d','-s','AINotifyWork:I')
+        ($workerLog -join "`n").Contains("SyncWorker eventId=$pushId result=Success fresh=0")
+    } 'duplicate push worker finishes with no fresh notifications' 45
+
+    if ($WearMode -eq 'paired') {
+        $null = Wait-For { & $adb -s $WearSerial shell input keyevent KEYCODE_WAKEUP 2>$null | Out-Null; Test-Notification $WearSerial $pushId } 'paired watch push notification' 60
+        $null = Invoke-CheckedAdb $WearSerial @('shell','am','start','-W','-n',"$package/$namespace.wear.MainActivity",'--es','ainotify_event',$pushId)
+        $null = Wait-For { (Get-Ui $WearSerial).OuterXml.Contains('Push Wakeup Delivered Successfully') } 'paired watch push preview' 60
+    }
+
+    $null = Invoke-CheckedAdb $PhoneSerial @('shell','input','keyevent','KEYCODE_WAKEUP')
+    $null = Invoke-CheckedAdb $PhoneSerial @('shell','wm','dismiss-keyguard')
+
+    $unregBody = @{ token = $pushToken } | ConvertTo-Json
+    $null = Invoke-RestMethod -NoProxy "$url/v1/devices/unregister" -Method Post -Headers @{Authorization="Bearer $inboxToken"} -ContentType 'application/json' -Body $unregBody
+
+    $null = & $adb -s $PhoneSerial shell am start-foreground-service "$package/$namespace.mobile.ReceiveService" 2>&1
+
+    $allLogs = (Get-ChildItem -LiteralPath $OutputDir -Filter '*.log' -File | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+    if ($allLogs.Contains($pushToken)) { throw "Raw push token leaked into log files!" }
+
+    'PASS: Relay push registration, screen-off wake, retry after Relay outage and notification deduplication'
 }
 
 function Tap-Node([string]$Serial, $Node) {
@@ -170,10 +333,7 @@ function Tap-Item([string]$Serial, [string]$Expected) {
 [IO.Directory]::CreateDirectory($OutputDir) | Out-Null
 $scratch = Join-Path ([IO.Path]::GetTempPath()) ('ainotify-ci-' + [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($scratch) | Out-Null
-$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
-$listener.Start()
-$port = $listener.LocalEndpoint.Port
-$listener.Stop()
+$port = Get-TestRelayPort
 $url = "http://127.0.0.1:$port"
 $reader = [Guid]::NewGuid().ToString('N')
 $inboxToken = [Guid]::NewGuid().ToString('N')
@@ -213,10 +373,21 @@ try {
     $rejectedWrite = Invoke-WebRequest -NoProxy "$url/v1/events" @writeCheck
     if ($rejectedWrite.StatusCode -ne 401) { throw "Reader write request returned $($rejectedWrite.StatusCode)" }
 
-    Prepare-Avd $PhoneSerial $phoneApk 'mobile' $true
+    if ($WearMode -eq 'paired') {
+        & $adb -s $PhoneSerial forward tcp:5601 tcp:5601
+        & $adb -s $PhoneSerial shell cmd deviceidle whitelist +com.google.android.apps.wear.companion 2>$null | Out-Null
+        & $adb -s $PhoneSerial shell cmd deviceidle whitelist +$package 2>$null | Out-Null
+        & $adb -s $WearSerial shell cmd deviceidle whitelist +$package 2>$null | Out-Null
+        & $adb -s $PhoneSerial shell am start -n com.google.android.apps.wear.companion/.core.application.RootActivity 2>$null | Out-Null
+        Start-Sleep -Seconds 1
+    }
     Prepare-Avd $WearSerial $wearApk 'wear' ($WearMode -eq 'direct')
+    Prepare-Avd $PhoneSerial $phoneApk 'mobile' $true
+    Start-Sleep -Seconds 6
     $null = Invoke-CheckedAdb $PhoneSerial @('shell','input','keyevent','KEYCODE_HOME')
-    $null = Invoke-CheckedAdb $WearSerial @('shell','input','keyevent','KEYCODE_HOME')
+    if ($WearMode -eq 'direct') {
+        $null = Invoke-CheckedAdb $WearSerial @('shell','input','keyevent','KEYCODE_WAKEUP')
+    }
 
     $body = "原型验收：最后一条回复。" + (("启动测试并保留末尾标记。") * 60) + ' END-AINOTIFY-WINDOWS'
     $cases = @(
@@ -279,21 +450,21 @@ try {
 
     $phoneId = $cases[0].eventId
     $wearId = $cases[1].eventId
+    $null = Invoke-CheckedAdb $PhoneSerial @('shell','input','keyevent','KEYCODE_WAKEUP')
+    $null = Invoke-CheckedAdb $PhoneSerial @('shell','wm','dismiss-keyguard')
+    $null = Invoke-CheckedAdb $WearSerial @('shell','input','keyevent','KEYCODE_WAKEUP')
+    $null = Invoke-CheckedAdb $WearSerial @('shell','wm','dismiss-keyguard')
     $null = Wait-For { Test-Notification $PhoneSerial $phoneId } 'phone alert'
-    $null = Wait-For { Test-Notification $WearSerial $wearId } "watch alert ($WearMode mode)"
+    $null = Wait-For { & $adb -s $WearSerial shell input keyevent KEYCODE_WAKEUP 2>$null | Out-Null; Test-Notification $WearSerial $wearId } "watch alert ($WearMode mode)" 120
     $null = Invoke-CheckedAdb $PhoneSerial @('shell','cmd','statusbar','expand-notifications')
+    Start-Sleep -Milliseconds 600
     Tap-Item $PhoneSerial 'CI-Windows'
     $null = Wait-For {
-        $ui = Get-Ui $PhoneSerial
-        if (-not $ui.OuterXml.Contains('END-AINOTIFY-WINDOWS')) {
-            $ui.SelectNodes('//node') | Where-Object { $_.package -eq $package } |
-                ForEach-Object { $_.text } | Set-Content -LiteralPath (Join-Path $OutputDir 'phone-ui.txt')
-            Save-Screenshot $PhoneSerial 'phone-current.png'
-        }
-        $ui.OuterXml.Contains('END-AINOTIFY-WINDOWS')
-    } 'notification tap opens full reply'
+        (Get-Ui $PhoneSerial).OuterXml.Contains('END-AINOTIFY-WINDOWS')
+    } 'notification tap opens full reply' 45
     Save-Screenshot $PhoneSerial 'phone-reply.png'
 
+    $null = Invoke-CheckedAdb $WearSerial @('shell','input','keyevent','KEYCODE_WAKEUP')
     $null = Invoke-CheckedAdb $WearSerial @('shell','am','start','-W','-n',"$package/$namespace.wear.MainActivity",
         '--es','ainotify_event',$wearId)
     $null = Wait-For {
@@ -326,6 +497,18 @@ try {
         & (Join-Path $AgentRoot 'scripts/desktop-smoke.ps1') @smoke
     }
 
+    $pairedChecks = @()
+    if ($WearMode -eq 'paired') {
+        Test-PairedRelaySwitch
+        $pairedChecks += 'paired-relay-switch-first-event'
+    }
+
+    Test-PushWakeupAndBackgroundSync
+    $pushChecks = @('relay-device-register','push-wakeup-screen-off','push-worker-retry-after-relay-outage','push-dedup','push-device-unregister')
+    if ($WearMode -eq 'paired') {
+        $pushChecks += 'paired-push-wear-sync'
+    }
+
     $revisions = @{}
     foreach ($repo in @($AgentRoot,$RelayRoot,$AndroidRoot,(Split-Path -Parent $PSScriptRoot))) {
         $name = Split-Path $repo -Leaf
@@ -337,11 +520,16 @@ try {
         phone = $PhoneSerial
         wear = $WearSerial
         wear_mode = $WearMode
-        passed = @('hook-stdin','offline-retry','auth','sqlite-restart','dedup','cursor','phone-notification','phone-detail','wear-notification','wear-preview','frontend-identity','device-group-filters','phone-swipes','phone-undo','relay-inbox-auth','relay-inbox-idempotency','phone-offline-recovery','phone-trash-restore','phone-language-theme-accent')
+        passed = @('hook-stdin','offline-retry','auth','sqlite-restart','dedup','cursor','phone-notification','phone-detail','wear-notification','wear-preview','frontend-identity','device-group-filters','phone-swipes','phone-undo','relay-inbox-auth','relay-inbox-idempotency','phone-offline-recovery','phone-trash-restore','phone-language-theme-accent') + $pairedChecks + $pushChecks
         desktop = if ($SkipDesktop) { 'skipped' } else { 'passed' }
         real_ai_sessions = 'not run by this offline integration check'
         revisions = $revisions
     } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutputDir 'receipt.json') -Encoding utf8NoBOM
+
+    if ($script:lastPushToken) {
+        $receiptText = Get-Content -Raw -LiteralPath (Join-Path $OutputDir 'receipt.json')
+        if ($receiptText.Contains($script:lastPushToken)) { throw "Raw push token leaked into receipt.json!" }
+    }
 } finally {
     Stop-TestRelay $relayProcess
     foreach ($serial in @($PhoneSerial,$WearSerial)) {

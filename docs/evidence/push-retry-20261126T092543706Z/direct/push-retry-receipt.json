@@ -1,0 +1,5 @@
+{
+  "mode": "direct",
+  "passed": true,
+  "check": "push-worker-retry-after-relay-outage"
+}

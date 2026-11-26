@@ -1,0 +1,52 @@
+{
+  "desktop": "passed",
+  "wear_mode": "paired",
+  "passed": [
+    "hook-stdin",
+    "offline-retry",
+    "auth",
+    "sqlite-restart",
+    "dedup",
+    "cursor",
+    "phone-notification",
+    "phone-detail",
+    "wear-notification",
+    "wear-preview",
+    "frontend-identity",
+    "device-group-filters",
+    "phone-swipes",
+    "phone-undo",
+    "relay-inbox-auth",
+    "relay-inbox-idempotency",
+    "phone-offline-recovery",
+    "phone-trash-restore",
+    "phone-language-theme-accent",
+    "paired-relay-switch-first-event",
+    "relay-device-register",
+    "push-wakeup-screen-off",
+    "push-dedup",
+    "push-device-unregister",
+    "paired-push-wear-sync"
+  ],
+  "wear": "emulator-5558",
+  "phone": "emulator-5562",
+  "real_ai_sessions": "not run by this offline integration check",
+  "revisions": {
+    "ai-notify-relay": {
+      "commit": "9e6eadbecc6b4f0d416a49970aa70da9c69ea9f6",
+      "dirty": true
+    },
+    "ai-notify-android": {
+      "commit": "61b28bf6e332f997a14e819e5c02af4434dce7c5",
+      "dirty": true
+    },
+    "AINotify": {
+      "commit": "c7871b72a4eb2e19679b9a32034d29b8d77b33cf",
+      "dirty": true
+    },
+    "ai-notify-agent": {
+      "commit": "812bf4818f12985c9caa05258f1bc7a66cbfa2f0",
+      "dirty": true
+    }
+  }
+}

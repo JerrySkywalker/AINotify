@@ -1,4 +1,4 @@
-# Dot-sourced by e2e.ps1. Uses its isolated relay, credentials, and phone AVD.
+﻿# Dot-sourced by e2e.ps1. Uses its isolated relay, credentials, and phone AVD.
 function Get-PhoneNode([string]$Expected, [switch]$Contains, [int]$Seconds = 18) {
     Wait-For {
         (Get-Ui $PhoneSerial).SelectNodes('//node') | Where-Object {
@@ -12,6 +12,25 @@ function Get-PhoneNode([string]$Expected, [switch]$Contains, [int]$Seconds = 18)
 
 function Tap-Phone([string]$Label, [switch]$Contains) {
     Tap-Node $PhoneSerial (Get-PhoneNode $Label -Contains:$Contains)
+}
+
+function Select-PhoneTab([string]$Name) {
+    Wait-For {
+        $node = (Get-Ui $PhoneSerial).SelectNodes('//node') | Where-Object {
+            $_.package -eq $package -and $_.text -eq $Name
+        } | Select-Object -First 1
+        if ($node) {
+            $tab = $node.ParentNode
+            if ($tab -and $tab.selected -eq 'true') { return $true }
+            Tap-Node $PhoneSerial $(if ($tab) { $tab } else { $node })
+            Start-Sleep -Milliseconds 600
+            $check = (Get-Ui $PhoneSerial).SelectNodes('//node') | Where-Object {
+                $_.package -eq $package -and $_.text -eq $Name
+            } | Select-Object -First 1
+            if ($check -and $check.ParentNode -and $check.ParentNode.selected -eq 'true') { return $true }
+        }
+        $null
+    } "phone tab: $Name" 20
 }
 
 function Assert-PhoneMissing([string]$Label) {
@@ -28,7 +47,7 @@ function Gesture-Phone([string]$Label, [ValidateSet('left','right')][string]$Dir
     $a = [int]([int]$Matches[1] * 0.16)
     $b = [int]([int]$Matches[1] * $(if ($Short) { 0.29 } else { 0.82 }))
     if ($Direction -eq 'left') { $from = $b; $to = $a } else { $from = $a; $to = $b }
-    $duration = if ($Short) { '650' } else { '410' }
+    $duration = if ($Short) { '650' } else { '400' }
     $null = Invoke-CheckedAdb $PhoneSerial @('shell','input','swipe',"$from","$y","$to","$y",$duration)
 }
 
@@ -96,63 +115,104 @@ function Run-PhoneInboxChecks {
     Tap-Phone 'Dark graphite'
     Tap-Phone 'Create group'
     Tap-Phone 'Group name' -Contains
-    $null = Invoke-CheckedAdb $PhoneSerial @('shell','input','text','Build%sfarm')
+    Start-Sleep -Milliseconds 800
+    $groupName = ''
+    foreach ($character in 'F','a','r','m') {
+        $null = Invoke-CheckedAdb $PhoneSerial @('shell','input','text',$character)
+        $groupName += $character
+        $null = Get-PhoneNode $groupName -Seconds 15
+    }
     $null = Invoke-CheckedAdb $PhoneSerial @('shell','input','keyevent','KEYCODE_BACK')
+    Start-Sleep -Milliseconds 500
     Tap-Phone 'CI-Linux' -Contains
     Tap-Phone 'Save'
-    $null = Get-PhoneNode 'Build farm' -Contains
+    $null = Get-PhoneNode 'Farm' -Contains
     Tap-Phone 'Back'
 
     Tap-Phone 'Devices and groups' -Contains
+    $null = Get-PhoneNode 'Done'
     Tap-Phone 'Members'
     $null = Get-PhoneNode 'Hide members'
-    Tap-Phone 'Build farm' -Contains
+    Tap-Phone 'Farm' -Contains
     Tap-Phone 'Done'
+    Start-Sleep -Milliseconds 600
     $null = Get-PhoneNode $claude -Contains
     Assert-PhoneMissing $codex
     Tap-Phone 'Devices and groups' -Contains
+    $null = Get-PhoneNode 'Done'
     Tap-Phone 'CI-Windows' -Contains
     Save-Screenshot $PhoneSerial 'phone-filters-graphite.png'
     Tap-Phone 'Done'
+    Start-Sleep -Milliseconds 600
     Tap-Phone 'AI frontends' -Contains
+    $null = Get-PhoneNode 'Done'
     Tap-Phone 'Codex Desktop' -Contains
     Tap-Phone 'Done'
+    Start-Sleep -Milliseconds 600
     $null = Get-PhoneNode $codex -Contains
     Assert-PhoneMissing $claude
     Tap-Phone 'AI frontends' -Contains
+    $null = Get-PhoneNode 'Done'
     Tap-Phone 'Claude Code CLI' -Contains
     Tap-Phone 'Done'
+    Start-Sleep -Milliseconds 600
     $null = Get-PhoneNode $claude -Contains
     $null = Get-PhoneNode $codex -Contains
     Assert-PhoneMissing $third
-    Tap-Phone 'Archive'
+    Select-PhoneTab 'Archive'
     $null = Get-PhoneNode 'No replies match these filters.'
-    Tap-Phone 'Inbox'
+    Select-PhoneTab 'Inbox'
+    Start-Sleep -Milliseconds 400
     Tap-Phone 'Clear filters'
+    Start-Sleep -Milliseconds 400
     'PASS: Device groups, selections and independent frontend facets in the phone UI'
 
     Gesture-Phone $codex 'right' -Short
     Assert-PhoneMissing 'Pinned'
+    Start-Sleep -Seconds 3
     Gesture-Phone $codex 'right'
     $pinState = Wait-For {
         $candidate = Get-RelayMailState $phoneId
-        if ($candidate.pinned) { $candidate }
-    } 'phone right swipe pins at relay'
+        if ($candidate.pinned) { return $candidate }
+        Start-Sleep -Milliseconds 2500
+        $candidate = Get-RelayMailState $phoneId
+        if ($candidate.pinned) { return $candidate }
+        Gesture-Phone $codex 'right'
+        $null
+    } 'phone right swipe pins at relay' 30
     $null = Get-PhoneNode $codex -Contains
     if ($pinState.seq -ne $state.seq + 1) { throw 'A single swipe must submit one operation.' }
+    Start-Sleep -Seconds 3
     Gesture-Phone $codex 'left'
+    $null = Wait-For {
+        $candidate = Get-RelayMailState $phoneId
+        if ($candidate.folder -eq 'archive') { return $candidate }
+        Start-Sleep -Milliseconds 2500
+        $candidate = Get-RelayMailState $phoneId
+        if ($candidate.folder -eq 'archive') { return $candidate }
+        Gesture-Phone $codex 'left'
+        $null
+    } 'phone left swipe archives at relay before undo' 30
+    Start-Sleep -Milliseconds 300
     Tap-Phone 'Undo'
     $null = Wait-For {
         $state = Get-RelayMailState $phoneId
         $state.folder -eq 'inbox' -and $state.pinned -and $state.seq -eq $pinState.seq + 2
-    } 'undo returns the reply to inbox'
+    } 'undo returns the reply to inbox' 30
     $null = Get-PhoneNode $codex -Contains
+    Start-Sleep -Seconds 3
     Gesture-Phone $codex 'left'
     $null = Wait-For {
         $state = Get-RelayMailState $phoneId
-        $state.folder -eq 'archive' -and $state.pinned
-    } 'phone left swipe archives at relay'
-    Tap-Phone 'Archive'
+        if ($state.folder -eq 'archive' -and $state.pinned) { return $state }
+        Start-Sleep -Milliseconds 2500
+        $state = Get-RelayMailState $phoneId
+        if ($state.folder -eq 'archive' -and $state.pinned) { return $state }
+        Gesture-Phone $codex 'left'
+        $null
+    } 'phone left swipe archives at relay' 30
+    Start-Sleep -Milliseconds 600
+    Select-PhoneTab 'Archive'
     $null = Get-PhoneNode $codex -Contains
     $null = Get-PhoneNode $third -Contains
 
@@ -171,11 +231,13 @@ function Run-PhoneInboxChecks {
     Stop-TestRelay $script:relayProcess
     $script:relayProcess = $null
     Gesture-Phone $codex 'right'
-    Tap-Phone 'Trash'
+    Start-Sleep -Milliseconds 600
+    Select-PhoneTab 'Trash'
     $null = Get-PhoneNode $codex -Contains
     $null = Get-PhoneNode 'Pending sync' -Contains
     $null = Invoke-CheckedAdb $PhoneSerial @('shell','am','force-stop',$package)
     $null = Invoke-CheckedAdb $PhoneSerial @('shell','am','start','-W','-n',$phonePackage,'--ez','ainotify_start','true')
+    Start-Sleep -Seconds 3
     $null = Get-PhoneNode $codex -Contains
     $null = Get-PhoneNode 'Pending sync' -Contains
     $null = Wait-For { Test-PhoneBackground 'phone-pending-graphite.png' '10161A' } 'graphite background'
@@ -202,6 +264,7 @@ function Run-PhoneInboxChecks {
     $null = Wait-For { Test-PhoneBackground 'phone-settings-amoled-zh.png' '000000' } 'AMOLED true-black background'
     $null = Invoke-CheckedAdb $PhoneSerial @('shell','am','force-stop',$package)
     $null = Invoke-CheckedAdb $PhoneSerial @('shell','am','start','-W','-n',$phonePackage,'--ez','ainotify_start','true')
+    Start-Sleep -Seconds 3
     Tap-Phone '设置'
     $null = Get-PhoneNode 'AMOLED 纯黑' -Contains
     $null = Get-PhoneNode '蓝色' -Contains

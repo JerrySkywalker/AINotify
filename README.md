@@ -11,7 +11,7 @@ Send the final reply from coding agents on your computers and servers to one And
 | [ai-notify-relay](https://github.com/JerrySkywalker/ai-notify-relay) | Rust HTTP service that authenticates devices and stores events in SQLite |
 | [ai-notify-android](https://github.com/JerrySkywalker/ai-notify-android) | Android inbox and Wear OS preview app in one Gradle build |
 
-Clone the four repositories as siblings. See the [component manifest](components/manifest.json).
+Clone the four repositories as siblings. See the [component manifest](components/manifest.json) and the [development handoff and acceptance checklist](docs/GOAL-TRAIN-v0.4.0.md).
 
 ## v0.2.0 preview
 

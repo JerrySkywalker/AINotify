@@ -12,7 +12,8 @@ param(
     [string]$GradleInitScript,
     [switch]$Offline,
     [switch]$SkipDesktop,
-    [switch]$Linux
+    [switch]$Linux,
+    [string]$RelayExe
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,6 +31,10 @@ $out = Join-Path (Split-Path -Parent $PSScriptRoot) ('build/ci/' + [DateTime]::U
 if ($Linux) {
     & (Join-Path $PSScriptRoot 'linux-ci.ps1') -SourceRoot $SourceRoot -OutputDir (Join-Path $out 'linux')
 }
+$profile = if ($DebugRust) { 'debug' } else { 'release' }
+if (-not $RelayExe) { $RelayExe = Join-Path $relay "target/$profile/ai-notify-relay.exe" }
+& (Join-Path $PSScriptRoot 'drill-relay-v0.4.1.ps1') -RelayExe $RelayExe
+
 $arguments = @{
     AgentRoot = $agent
     RelayRoot = $relay
@@ -41,16 +46,15 @@ $arguments = @{
     OutputDir = $out
     DebugRust = $DebugRust
     SkipDesktop = $SkipDesktop
+    RelayExe = $RelayExe
 }
 & (Join-Path $PSScriptRoot 'e2e.ps1') @arguments
-
-$profile = if ($DebugRust) { 'debug' } else { 'release' }
 $artifacts = Join-Path $out 'artifacts'
 [IO.Directory]::CreateDirectory($artifacts) | Out-Null
 $files = @(
     (Join-Path $agent "target/$profile/ai-notify-agent.exe"),
     (Join-Path $agent "target/$profile/ai-notify-desktop.exe"),
-    (Join-Path $relay "target/$profile/ai-notify-relay.exe"),
+    $RelayExe,
     (Join-Path $android 'mobile/build/outputs/apk/debug/mobile-debug.apk'),
     (Join-Path $android 'wear/build/outputs/apk/debug/wear-debug.apk')
 )

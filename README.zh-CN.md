@@ -26,3 +26,5 @@ Material 3 手机收件箱支持设备、设备组和 AI 前端组合筛选。�
 原型包包含 Windows 托盘程序、Windows 和 Linux 采集端与 relay、Android 和 Wear OS 调试 APK，以及 SHA-256 校验值。手机和手表均用 API 35 模拟器验收，手表走 relay 直连。模拟器使用前台服务收取事件。
 
 把四个仓库检出为同级目录。项目清单见 [components/manifest.json](components/manifest.json)。安装步骤、双模拟器参数和本地 CI 命令见 [英文 README](README.md)。四个仓库均禁用 GitHub Actions，CI 继续在本机运行。后续计划见 [路线图](docs/ROADMAP.md)。
+
+当前开发状态、验收证据和接续步骤见 [Goal Train](docs/GOAL-TRAIN-v0.4.0.md)。
